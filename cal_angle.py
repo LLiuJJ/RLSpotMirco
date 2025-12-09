@@ -3,8 +3,8 @@ import math
 # 参数（与 MATLAB 和之前的示例一致）
 L1 = 12.0  # 大腿长度 (cm)
 L2 = 12.0  # 小腿长度 (cm)
-R = 3    # 半圆半径 (cm)
-center_y = -13.0  # 相对于髋关节(0,0)的Y坐标
+R = 3.5    # 半圆半径 (cm)
+center_y = -18.0  # 相对于髋关节(0,0)的Y坐标
 num_swing = 20   # 摆动相点数
 num_support = 20 # 支撑相点数
 

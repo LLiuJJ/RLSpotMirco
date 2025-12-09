@@ -1,42 +1,50 @@
-#include <Servo.h>  // 包含舵机库
-#include <IRremote.h>
+#include <Wire.h>
+#include <Adafruit_PWMServoDriver.h>
+#include <Adafruit_MPU6050.h>
+#include <Adafruit_Sensor.h>
+
 
 #define IR_RECEIVE_PIN 45
 
-// 超声波：HC-SR04 接在 Trig=D30, Echo=D28
-const int TRIG_PIN = 30;
-const int ECHO_PIN = 28;
+// 定义 Trig 和 Echo 引脚
+const int trigPin = 2;
+const int echoPin = 3;
 
 // 红外按键：防抖参数
 unsigned long lastCode = 0;
-unsigned long lastTime = 0;
 const unsigned long DEBOUNCE_DELAY = 250; // 毫秒，防止重复触发
 
- 
-// 定义连接舵机的 Arduino Mega 引脚
-// 使用 Mega 上的 PWM 引脚 (2~13 或 44~46)
-// 这里选择引脚 6~13 (共8个连续引脚，方便管理) , 13会被干扰
-//
-//
-// 0: 2 -> R 前上  1: 3 -> R 前下 2: 4 -> R 前中
-// 3: 5 -> L 前中  4: 6 -> L 前上 5: 7 -> L 前下
-// 6: 8 -> L 后中  7: 9 -> L 后下 8: 10 -> L 后上   
-// 9: 11 -> R 后中 10: 12 -> R 后上 11: 46 -> R 后下
-//
-Servo RF_UP;
-Servo RF_DOWN;
-Servo RF_MID;
-Servo LF_MID;
-Servo LF_UP;
-Servo LF_DOWN;
 
-Servo LB_MID;
-Servo LB_DOWN;
-Servo LB_UP;
-Servo RB_MID;
-Servo RB_UP;
-Servo RB_DOWN;
+// 0 RF_UP
+// 1 RF_MID
+// 2 RF_DOWN
 
+// 3 LF_UP
+// 4 LF_MID
+// 5 LF_DOWN
+
+// 6 LB_UP
+// 7 LB_MID
+// 8 LB_DOWN
+
+// 9 RB_UP
+// 10 RB_MID
+// 11 RB_DOWN
+
+const int RF_UP = 0;
+const int RF_DOWN = 2;
+const int RF_MID  = 1;
+const int LF_MID = 4;
+const int LF_UP = 3;
+const int LF_DOWN = 5;
+
+const int LB_MID = 7;
+const int LB_DOWN = 8;
+const int LB_UP = 6;
+
+const int RB_MID = 10;
+const int RB_UP = 9;
+const int RB_DOWN = 11;
 
 const int STEP_DELAY = 300;
 
@@ -44,115 +52,168 @@ const int STEP_DELAY = 300;
 unsigned long lastPing = 0;
 const long PING_INTERVAL = 3000; // 3秒心跳
 
+
+// 创建 PCA9685 对象（默认地址 0x40）
+Adafruit_PWMServoDriver pwm = Adafruit_PWMServoDriver();
+
+// === 舵机参数（针对 SPT5425LV，6V 供电）===
+// 实测建议值（需根据你的舵机微调）
+#define SERVOMIN  102  // ≈ 500μs
+#define SERVOMAX  512  // ≈ 2500μs
+// 注：SG90 通常为 100~500，金属舵机范围更大
+
+// 舵机通道分配（示例：四足狗，3DoF×4腿=12舵机）
+const byte LEG_CHANNELS[12] = {
+  0, 1, 2,   // 左前腿：髋、膝、踝
+  3, 4, 5,   // 右前腿
+  6, 7, 8,   // 左后腿
+  9,10,11    // 右后腿
+};
+
+
+Adafruit_MPU6050 mpu;
+
+void setup() {
+
+  Serial.begin(115200);
+  Serial.println("PCA9685 初始化...");
+
+  Serial1.begin(115200); 
+
+  if (!mpu.begin()) {
+    Serial.println("MPU6050 未找到！");
+    while (1) delay(10);
+  }
+
+  Serial.println("MPU6050 初始化成功！");
+
+  // 可选：设置量程（默认即可）
+  mpu.setAccelerometerRange(MPU6050_RANGE_8_G);
+  mpu.setGyroRange(MPU6050_RANGE_500_DEG);
+  mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
+
+
+  pwm.begin();
+  pwm.setPWMFreq(50);  // 舵机标准频率：50Hz
+
+  // 初始化所有舵机到 90°
+  for (int i = 0; i < 12; i++) {
+    setServoAngle(i, 90);
+  }
+
+  // 超声波
+  pinMode(trigPin, OUTPUT);
+  pinMode(echoPin, INPUT);
+
+  delay(10);
+
+}
+
+// 将角度（0~180）转换为 PCA9685 的 PWM 值
+uint16_t angleToPWM(int angle) {
+  angle = constrain(angle, 0, 180);
+  return map(angle, 0, 180, SERVOMIN, SERVOMAX);
+}
+
+// 设置指定舵机角度
+void setServoAngle(byte channel, int angle) {
+  uint16_t pulse = angleToPWM(angle);
+  pwm.setPWM(channel, 0, pulse);
+}
+
+
 // 坐下
 void sitDown() {
- RF_UP.write(90);
- RF_DOWN.write(90);
- RF_MID.write(90);
- LF_MID.write(90);
- LF_UP.write(90);
- LF_DOWN.write(90);
-
- LB_MID.write(90);
- LB_DOWN.write(90);
- LB_UP.write(90);
- RB_MID.write(90);
- RB_UP.write(90);
- RB_DOWN.write(90);
+ setServoAngle(RF_UP, 90);
+ setServoAngle(RF_DOWN, 90);
+ setServoAngle(RF_MID, 90);
+ setServoAngle(LF_MID, 90);
+ setServoAngle(LF_UP, 90);
+ setServoAngle(LF_DOWN, 90);
+ setServoAngle(LB_MID, 90);
+ setServoAngle(LB_DOWN, 90);
+ setServoAngle(LB_UP, 90);
+ setServoAngle(RB_MID, 90);
+ setServoAngle(RB_UP, 90);
+ setServoAngle(RB_DOWN, 90);
 
  delay(3000);
 }
 
-// 抬头握手
-//
-void lookUp() {
- RF_UP.write(90);
- RF_DOWN.write(20);
- RF_MID.write(90);
- LF_MID.write(90);
- LF_UP.write(90);
- LF_DOWN.write(160);
+void Stand() {
+    
+    setServoAngle(LB_UP, 90);
+    setServoAngle(LB_DOWN, 60);
+    setServoAngle(RB_UP, 90);
+    setServoAngle(RB_DOWN, 120);
+    delay(1000);
 
- LB_MID.write(90);
- LB_DOWN.write(90);
- LB_UP.write(90);
- RB_MID.write(90);
- RB_UP.write(90);
- RB_DOWN.write(90);
- delay(1000);
 
-  // 上下摆握手
-  for (int i = 20; i < 120; i++) {
-    RF_DOWN.write(i);
-    delay(10);
-  }
+    setServoAngle(LF_UP, 90);
+    setServoAngle(LF_DOWN, 60);
+    setServoAngle(RF_UP, 90);
+    setServoAngle(RF_DOWN, 120);
+
+    delay(2000);
+
+}
+
+void Sleep() {
+    setServoAngle(LB_UP, 20);
+    setServoAngle(LB_DOWN, 150);
+    setServoAngle(RB_UP, 160);
+    setServoAngle(RB_DOWN, 30);
+
+
+    setServoAngle(LF_UP, 20);
+    setServoAngle(LF_DOWN, 150);
+    setServoAngle(RF_UP, 160);
+    setServoAngle(RF_DOWN, 30);
+    delay(1000);
+
 }
 
 // 站立起来
 void SlowStandUp() {
-  LF_UP.write(180);  
-  LB_UP.write(180); 
-  
-  RF_UP.write(0); 
-  RB_UP.write(0); 
+  sitDown();
 
-  LF_DOWN.write(0);  
-  LB_DOWN.write(0); 
-  
-  RF_DOWN.write(180); 
-  RB_DOWN.write(180); 
+  for(int i = 0; i < 50; i++) {
+    setServoAngle(LF_UP, 90 - i);
+    setServoAngle(LB_UP, 90 - i);
 
-  delay(100);
+    setServoAngle(RF_UP, 90 + i);
+    setServoAngle(RB_UP, 90 + i);
 
-  LF_DOWN.write(50);  
-  LB_DOWN.write(50); 
-  
-  RF_DOWN.write(130); 
-  RB_DOWN.write(130); 
-  delay(1000);
+    delay(100);
+  }            
 
-  LF_MID.write(105);
-  RF_MID.write(75);
+  // for(int i = 0; i < 20; i++) {
+  //   setServoAngle(LF_DOWN, 90 - i);
+  //   setServoAngle(LB_DOWN, 90 - i);
+
+  //   setServoAngle(RF_DOWN, 90 + i);
+  //   setServoAngle(RB_DOWN, 90 + i);
+
+  //   delay(100);
+  // }            
+
+  delay(2000);
 }
 
+void LookUp() {
+    sitDown();
+    
+    setServoAngle(RF_DOWN, 130);
+    setServoAngle(LF_DOWN, 70);
 
-void setup() {
-  // 初始化与电脑通信的串口，用于调试
-  Serial.begin(115200);
-  IrReceiver.begin(IR_RECEIVE_PIN, ENABLE_LED_FEEDBACK); // 启用板载 LED 反馈（如有）
-  Serial.println("KEYES 红外接收（带防抖）");
-
-  // 初始化与蓝牙模块通信的串口
-  Serial1.begin(9600); // HC-05 默认波特率通常是 9600 或 38400
-
-  // 超声波模块初始化
-  pinMode(TRIG_PIN, OUTPUT);
-  pinMode(ECHO_PIN, INPUT);
-
-  // 绑定舵机 PWM 信号口
-  // 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 46
-  RF_UP.attach(2);
-  RF_DOWN.attach(3);
-  RF_MID.attach(4);
-  LF_MID.attach(5);
-  LF_UP.attach(6);
-  LF_DOWN.attach(7);
-  LB_MID.attach(8);
-  LB_DOWN.attach(9);
-  LB_UP.attach(10);
-  RB_MID.attach(11);
-  RB_UP.attach(12);
-  RB_DOWN.attach(46);
-
-  // 初始化状态为坐下                                                                                                                                                                                                                                                                            
-  sitDown();
+    delay(1000);
 }
 
 // 步态参数
 const int NUM_SWING = 20;   // 摆动相点数
 const int NUM_SUPPORT = 20; // 支撑相点数
 const int TOTAL_FRAMES = NUM_SWING + NUM_SUPPORT;
-const int FRAME_DELAY = 30; // 每帧间隔 ms
+const int FRAME_DELAY = 20; // 每帧间隔 ms
 
 //
 // cal_angle.py 生成
@@ -186,34 +247,54 @@ PROGMEM const uint8_t kneeAnglesBak[TOTAL_FRAMES] = {
 };
 
 
+// small
+PROGMEM const uint8_t hipAnglesSmall[TOTAL_FRAMES] =  {
+39, 37, 35, 33, 32, 32, 32, 33, 34, 36, 38, 41, 44, 47, 49, 52, 55, 57, 59, 61,
+61, 59, 58, 57, 55, 54, 53, 52, 50, 49, 48, 47, 46, 45, 44, 43, 42, 41, 40, 39
+};
 
-void stepForward() {           
-  // 抬起左前 & 右后腿
-  LF_DOWN.write(40); 
-  RB_DOWN.write(140);
-  delay(200);
-  LF_DOWN.write(50); 
-  RB_DOWN.write(130);
-  delay(200);
-  // 抬起左后 & 右前腿
-  LB_DOWN.write(40);  
-  RF_DOWN.write(140);
-  delay(200);
-  LB_DOWN.write(50);  
-  RF_DOWN.write(130);
-  delay(200);
-}
+PROGMEM const uint8_t kneeAnglesSmall[TOTAL_FRAMES] = {
+100, 95, 91, 88, 84, 81, 79, 77, 75, 74, 74, 75, 77, 79, 81, 84, 88, 91, 95, 100, 
+100, 99, 99, 98, 98, 98, 98, 97, 97, 97, 97, 97, 97, 98, 98, 98, 98, 99, 99, 100
+};
+
+
+
+// L1 = 12.0  # 大腿长度 (cm)
+// L2 = 12.0  # 小腿长度 (cm)
+// R = 5    # 半圆半径 (cm)
+// center_y = -13.0  # 相对于髋关节(0,0)的Y坐标
+// num_swing = 20   # 摆动相点数
+// num_support = 20 # 支撑相点数
+// PROGMEM const uint8_t hipAngles[40] = {
+// 57, 55, 53, 51, 48, 44, 40, 35, 29, 22, 17, 12, 8, 5, 4, 5, 6, 8, 11, 14, 14, 16, 18, 19, 21, 23, 25, 27, 29, 32, 34, 36, 39, 41, 44, 46, 49, 51, 54, 57
+// };
+
+// PROGMEM const uint8_t kneeAngles[40] = {
+// 71, 66, 62, 57, 53, 49, 45, 42, 40, 39, 39, 40, 42, 45, 49, 53, 57, 62, 66, 71, 71, 70, 69, 68, 67, 67, 66, 66, 66, 66, 66, 66, 66, 66, 67, 67, 68, 69, 70, 71
+// };
+
+PROGMEM const uint8_t hipAnglesBig[TOTAL_FRAMES] =  {
+27, 24, 21, 19, 17, 17, 17, 19, 22, 25, 29, 34, 39, 43, 48, 51, 55, 57, 60, 62,
+62, 59, 57, 55, 53, 51, 49, 47, 45, 43, 41, 39, 37, 36, 34, 32, 31, 30, 28, 27
+};
+
+PROGMEM const uint8_t kneeAnglesBig[TOTAL_FRAMES] = {
+89, 83, 78, 73, 69, 64, 61, 58, 56, 55, 55, 56, 58, 61, 64, 69, 73, 78, 83, 89,
+89, 88, 87, 86, 85, 85, 84, 84, 84, 84, 84, 84, 84, 84, 85, 85, 86, 87, 88, 89
+};
+
 
 void slowBackWalk() {
  for (int i = 0; i < TOTAL_FRAMES; i++) {
     uint8_t h = pgm_read_byte(&hipAnglesBak[i]);
     uint8_t k = pgm_read_byte(&kneeAnglesBak[i]);
 
-    LF_UP.write(180 - h);  
-    LF_DOWN.write(k);  
+    setServoAngle(LF_UP, h);
+    setServoAngle(LF_DOWN, 180 - k);
 
-    RB_UP.write(h);
-    RB_DOWN.write(180 - k);
+    setServoAngle(RB_UP, 180 - h);
+    setServoAngle(RB_DOWN, k);
 
     delay(FRAME_DELAY);
   }
@@ -224,207 +305,358 @@ void slowBackWalk() {
     uint8_t h = pgm_read_byte(&hipAnglesBak[i]);
     uint8_t k = pgm_read_byte(&kneeAnglesBak[i]);
 
-    LB_UP.write(180 - h);  
-    LB_DOWN.write(k);  
+    setServoAngle(LB_UP, h);
+    setServoAngle(LB_DOWN, 180 - k);
 
-    RF_UP.write(h);
-    RF_DOWN.write(180 - k);
+    setServoAngle(RF_UP, 180 - h);
+    setServoAngle(RF_DOWN, k);
 
     delay(FRAME_DELAY);
   }
 }
 
-// 键盘硬件参数
-// KEYES 遥控器 NEC 协议按键码（32-bit）
-const uint32_t KEY_0     = 0xAD52FF00;
-const uint32_t KEY_1     = 0xE916FF00;
-const uint32_t KEY_2     = 0xE619FF00;
-const uint32_t KEY_3     = 0xF20DFF00;
-const uint32_t KEY_4     = 0xF30CFF00;
-const uint32_t KEY_5     = 0xE718FF00;
-const uint32_t KEY_6     = 0xA15EFF00;
-const uint32_t KEY_7     = 0xF708FF00;
-const uint32_t KEY_8     = 0xE31CFF00;
-const uint32_t KEY_9     = 0xA55AFF00;
+void runCycleRight() {
 
-const uint32_t KEY_STAR  = 0xFFB847;   // *
-const uint32_t KEY_HASH  = 0xFF7A85;   // #
+    int kc = 0;
+    for (int i = 20; i < TOTAL_FRAMES; i++) {
+      uint8_t h = pgm_read_byte(&hipAnglesSmall[i]);
+      uint8_t k = pgm_read_byte(&kneeAnglesSmall[i]);
 
-const uint32_t KEY_UP    = 0xB946FF00;
-const uint32_t KEY_DOWN  = 0xEA15FF00;
-const uint32_t KEY_LEFT  = 0xBB44FF00;
-const uint32_t KEY_RIGHT = 0xBC43FF00;
-const uint32_t KEY_OK    = 0xBF40FF00;
+      uint8_t hr = pgm_read_byte(&hipAnglesSmall[39 - kc]);
+      uint8_t kr = pgm_read_byte(&kneeAnglesSmall[39 - kc]);
 
-const uint32_t KEY_POWER = 0xFF6897;   // 电源键（部分套件有）
-const uint32_t KEY_MODE  = 0xFF18E7;   // MODE 键（部分套件有）
-const uint32_t KEY_MUTE  = 0xFF4AB5;   // 静音（较少见）
-const uint32_t KEY_PLAY  = 0xFF58A7;   // ▶ 播放（部分版本）
+      // 左前右后前划
+      setServoAngle(LF_UP, h);
+      setServoAngle(LF_DOWN, 180 - k);
 
-int cnt = 0;
+      setServoAngle(RB_UP, 180 - hr);
+      setServoAngle(RB_DOWN, kr);
+
+
+      kc = kc + 1;
+      delay(10);
+    }
+
+    delay(20);
+
+    kc = 0;
+
+    for (int i = 20; i < TOTAL_FRAMES; i++) {
+      uint8_t h = pgm_read_byte(&hipAnglesSmall[i]);
+      uint8_t k = pgm_read_byte(&kneeAnglesSmall[i]);
+
+      uint8_t hr = pgm_read_byte(&hipAnglesSmall[39 - kc]);
+      uint8_t kr = pgm_read_byte(&kneeAnglesSmall[39 - kc]);
+
+
+      // 左后右前后划
+      setServoAngle(LB_UP, h);
+      setServoAngle(LB_DOWN, 180 - k);
+
+      setServoAngle(RF_UP, 180 - hr);
+      setServoAngle(RF_DOWN, kr);
+
+      kc = kc + 1;
+
+      delay(10);
+    }
+
+}
+
+
+void runCycleLeft() {
+
+    int kc = 0;
+    for (int i = 20; i < TOTAL_FRAMES; i++) {
+      uint8_t h = pgm_read_byte(&hipAnglesSmall[i]);
+      uint8_t k = pgm_read_byte(&kneeAnglesSmall[i]);
+
+      uint8_t hr = pgm_read_byte(&hipAnglesSmall[39 - kc]);
+      uint8_t kr = pgm_read_byte(&kneeAnglesSmall[39 - kc]);
+
+      // 左前右后前划
+      setServoAngle(LF_UP, hr);
+      setServoAngle(LF_DOWN, 180 - kr);
+
+      setServoAngle(RB_UP, 180 - h);
+      setServoAngle(RB_DOWN, k);
+
+
+      kc = kc + 1;
+      delay(10);
+    }
+
+    delay(20);
+
+    kc = 0;
+
+    for (int i = 20; i < TOTAL_FRAMES; i++) {
+      uint8_t h = pgm_read_byte(&hipAnglesSmall[i]);
+      uint8_t k = pgm_read_byte(&kneeAnglesSmall[i]);
+
+      uint8_t hr = pgm_read_byte(&hipAnglesSmall[39 - kc]);
+      uint8_t kr = pgm_read_byte(&kneeAnglesSmall[39 - kc]);
+
+
+      // 左后右前后划
+      setServoAngle(LB_UP, hr);
+      setServoAngle(LB_DOWN, 180 - kr);
+
+      setServoAngle(RF_UP, 180 - h);
+      setServoAngle(RF_DOWN, k);
+
+      kc = kc + 1;
+
+      delay(10);
+    }
+
+}
+
+void rightSlowBackWalk() {
+    setServoAngle(RF_MID, 100);
+    setServoAngle(RB_MID, 80);
+
+    delay(100);
+
+    for (int i = 0; i < TOTAL_FRAMES; i++) {
+      uint8_t h = pgm_read_byte(&hipAnglesBak[i]);
+      uint8_t k = pgm_read_byte(&kneeAnglesBak[i]);
+
+      uint8_t hbig = pgm_read_byte(&hipAnglesBig[i]);
+      uint8_t kbig = pgm_read_byte(&kneeAnglesBig[i]);
+
+
+      setServoAngle(LF_UP, hbig);
+      setServoAngle(LF_DOWN, 180 - kbig);
+
+      setServoAngle(RB_UP, 180 - h);
+      setServoAngle(RB_DOWN, k);
+
+      delay(FRAME_DELAY);
+    }
+
+  delay(100);
+
+  for (int i = 0; i < TOTAL_FRAMES; i++) {
+    uint8_t h = pgm_read_byte(&hipAnglesBak[i]);
+    uint8_t k = pgm_read_byte(&kneeAnglesBak[i]);
+
+    uint8_t hbig = pgm_read_byte(&hipAnglesBig[i]);
+    uint8_t kbig = pgm_read_byte(&kneeAnglesBig[i]);
+
+    setServoAngle(LB_UP, hbig);
+    setServoAngle(LB_DOWN, 180 - kbig);
+
+    setServoAngle(RF_UP, 180 - h);
+    setServoAngle(RF_DOWN, k);
+
+    delay(FRAME_DELAY);
+  }
+}
+
+void leftSlowBackWalk() {
+
+    setServoAngle(LF_MID, 80);
+    setServoAngle(LB_MID, 100);
+    delay(100);
+
+ for (int i = 0; i < TOTAL_FRAMES; i++) {
+    uint8_t h = pgm_read_byte(&hipAnglesBak[i]);
+    uint8_t k = pgm_read_byte(&kneeAnglesBak[i]);
+
+    uint8_t hbig = pgm_read_byte(&hipAnglesBig[i]);
+    uint8_t kbig = pgm_read_byte(&kneeAnglesBig[i]);
+
+
+    setServoAngle(LF_UP, h);
+    setServoAngle(LF_DOWN, 180 - k);
+
+    setServoAngle(RB_UP, 180 - hbig);
+    setServoAngle(RB_DOWN, kbig);
+
+    delay(FRAME_DELAY);
+  }
+
+  delay(100);
+
+  for (int i = 0; i < TOTAL_FRAMES; i++) {
+    uint8_t h = pgm_read_byte(&hipAnglesBak[i]);
+    uint8_t k = pgm_read_byte(&kneeAnglesBak[i]);
+
+    uint8_t hbig = pgm_read_byte(&hipAnglesBig[i]);
+    uint8_t kbig = pgm_read_byte(&kneeAnglesBig[i]);
+
+    setServoAngle(LB_UP, h);
+    setServoAngle(LB_DOWN, 180 - k);
+
+    setServoAngle(RF_UP, 180 - hbig);
+    setServoAngle(RF_DOWN, kbig);
+
+    delay(FRAME_DELAY);
+  }
+}
+
+
+// =============== 定义你的命令列表 ===============
+struct Command {
+  const byte* pattern;   // 指令字节序列
+  int length;            // 指令长度
+  const char* action;    // 对应的动作名称（可打印）
+};
+
+// 具体指令（按你提供的格式）
+const byte CMD_RUN[]    = {0xAA, 0x55, 0x00, 0x04, 0xFB};
+const byte CMD_DOWN[]  = {0xAA, 0x55, 0x00, 0x01, 0xFB};
+const byte CMD_UP[]  = {0xAA, 0x55, 0x00, 0x02, 0xFB};
+const byte CMD_LOOPUP[] = {0xAA, 0x55, 0x00, 0x2D, 0xFB};
+const byte CMD_LEFT[] = {0xAA, 0x55, 0x00, 0x29, 0xFB};
+const byte CMD_RIGHT[] = {0xAA, 0x55, 0x00, 0x2A, 0xFB}; 
+
+
+const byte CMD_CYCLE_LEFT[] = {0xAA, 0x55, 0x00, 0x08, 0xFB};
+const byte CMD_CYCLE_RIGHT[] = {0xAA, 0x55, 0x00, 0x09, 0xFB};
+
+
+
+// 命令表（数组）
+const Command commandList[] = {
+  {CMD_RUN,    sizeof(CMD_RUN),    "run"},
+  {CMD_DOWN,  sizeof(CMD_DOWN),  "down"},
+  {CMD_UP,  sizeof(CMD_UP),  "up"},
+  {CMD_LOOPUP, sizeof(CMD_LOOPUP), "lookup"},
+  {CMD_LEFT, sizeof(CMD_LEFT), "left"},
+  {CMD_RIGHT, sizeof(CMD_RIGHT), "right"},
+  {CMD_CYCLE_LEFT, sizeof(CMD_CYCLE_LEFT), "cycleleft"},
+  {CMD_CYCLE_RIGHT, sizeof(CMD_CYCLE_RIGHT), "cycleright"}
+};
+
+const int numCommands = sizeof(commandList) / sizeof(Command);
+
+// =============== 缓冲区设置 ===============
+// 找出最长指令的长度，作为缓冲区大小
+const int MAX_CMD_LENGTH = 5; // 这里都是5字节，可手动设为5；也可用宏自动计算（略复杂）
+
+byte buffer[MAX_CMD_LENGTH];
+int index = 0;
+
+// MPU
+float angleRoll = 0, anglePitch = 0, realAngleRoll = 0;
+unsigned long lastTime = 0;
 
 void loop() {
-  // 发送 10μs 脉冲触发测距
-  digitalWrite(TRIG_PIN, LOW);
+
+// slowBackWalk();
+// runCycle();
+// runCycleLeft();
+
+  {
+  sensors_event_t a, g, temp;
+  mpu.getEvent(&a, &g, &temp);
+
+  float dt = (millis() - lastTime) / 1000.0;
+  lastTime = millis();
+
+  // 1. 陀螺仪积分（单位：度/秒 → 度）
+  float gyroRoll = g.gyro.x * 180 / PI;
+  float gyroPitch = g.gyro.y * 180 / PI;
+
+  angleRoll += gyroRoll * dt;
+  anglePitch += gyroPitch * dt;
+
+  // 2. 加速度计计算静态角度（无 Z 轴旋转时有效）
+  float accRoll = atan2(a.acceleration.y, a.acceleration.z) * 180 / PI;
+  float accPitch = atan2(-a.acceleration.x, 
+                         sqrt(a.acceleration.y * a.acceleration.y + a.acceleration.z * a.acceleration.z)) * 180 / PI;
+
+  // 3. 互补滤波（α ≈ 0.96 表示更信任陀螺仪）
+  const float alpha = 0.96;
+  angleRoll = alpha * (angleRoll) + (1 - alpha) * accRoll;
+  anglePitch = alpha * (anglePitch) + (1 - alpha) * accPitch;
+  realAngleRoll = angleRoll + 180;
+
+
+  Serial.print("Roll: ");
+  Serial.print(realAngleRoll);
+  Serial.print("°, Pitch: ");
+  Serial.print(anglePitch);
+  Serial.println("°");
+  delay(10);
+
+}
+
+{
+// 清空触发引脚
+  digitalWrite(trigPin, LOW);
   delayMicroseconds(2);
-  digitalWrite(TRIG_PIN, HIGH);
+  
+  // 发送 10μs 高电平触发信号
+  digitalWrite(trigPin, HIGH);
   delayMicroseconds(10);
-  digitalWrite(TRIG_PIN, LOW);
-
-  // 读取回响时间（单位：微秒）
-  long duration = pulseIn(ECHO_PIN, HIGH);
-
-  // 计算距离（声速 340m/s = 0.034cm/μs → 距离 = 时间 / 2 * 0.034）
-  float distance = duration * 0.034 / 2.0;
-
+  digitalWrite(trigPin, LOW);
+  
+  // 读取 Echo 高电平持续时间（单位：微秒）
+  long duration = pulseIn(echoPin, HIGH);
+  
+  // 计算距离（声速 ≈ 340 m/s = 0.034 cm/μs）
+  // 距离 = (时间 × 声速) / 2（往返）
+  float distance = duration * 0.034 / 2.0; // 单位：厘米
+  
   Serial.print("Distance: ");
   Serial.print(distance);
   Serial.println(" cm");
+}
 
-  // 10 次 10 ～ 15cm 握手
-  if (distance > 10 && distance < 15) {
-    cnt++;
-    if (cnt > 20) {
-      lookUp();
-      cnt = 0;
-    }
-  }
+  while (Serial1.available()) {
+    byte b = Serial1.read();
 
-  delay(100); // 避免频繁测量（HC-SR04 最小周期约 60ms）
+    // 存入循环缓冲区
+    buffer[index] = b;
+    index = (index + 1) % MAX_CMD_LENGTH;
 
-  if (IrReceiver.decode()) {
-    // 获取解码后的数据
-    uint32_t currentCode = IrReceiver.decodedIRData.decodedRawData;
-    uint8_t protocol = IrReceiver.decodedIRData.protocol;
-
-    // 忽略重复码（REPEAT）
-    // if (protocol == UNKNOWN || protocol == UNUSED) {
-    //   IrReceiver.resume();
-    //   return;
-    // }
-
-    // 防抖逻辑：相同按键在 DEBOUNCE_DELAY 内只响应一次
-    if (currentCode != lastCode || (millis() - lastTime) > DEBOUNCE_DELAY) {
-      Serial.print("HEX: 0x");
-      Serial.println(currentCode, HEX);
-      // 这里做遥控器逻辑
-      switch (currentCode) {
-        case KEY_0:    { 
-          Serial.println("按键: 0"); 
-          sitDown();  
-          break; 
+    // 尝试匹配每一条命令
+    for (int i = 0; i < numCommands; i++) {
+      const Command& cmd = commandList[i];
+      
+      // 只有当缓冲区已满（至少收到 cmd.length 字节）才匹配
+      // 我们假设所有命令长度相同（如5字节），简化处理
+      if (cmd.length == MAX_CMD_LENGTH) {
+        // 构造一个临时视图：从 (index) 开始往前推 length 个字节
+        bool match = true;
+        for (int j = 0; j < cmd.length; j++) {
+          if (buffer[(index + j) % MAX_CMD_LENGTH] != cmd.pattern[j]) {
+            match = false;
+            break;
+          }
         }
-        case KEY_1:    { 
-          Serial.println("按键: 1"); 
-          SlowStandUp(); 
-          break; 
+        if (match) {
+          Serial.println(cmd.action); // 打印 "up", "down" 等
+          
+          // 🔔 可在此处添加实际控制逻辑
+          if (strcmp(cmd.action, "up") == 0) {
+            SlowStandUp();
+          } else if (strcmp(cmd.action, "down") == 0) {
+            sitDown();
+          } else if (strcmp(cmd.action, "run") == 0) { 
+            slowBackWalk();
+          } else if (strcmp(cmd.action, "lookup") == 0) {
+            LookUp();
+          } else if (strcmp(cmd.action, "left") == 0) {
+            leftSlowBackWalk();
+          } else if (strcmp(cmd.action, "right") == 0) {
+            rightSlowBackWalk();
+          } else if (strcmp(cmd.action, "cycleright") == 0) {
+            for (int i = 0; i < 5; i ++) {
+              runCycleRight();
+            }
+          } else if (strcmp(cmd.action, "cycleleft") == 0) {
+            for (int i = 0; i < 5; i ++) {
+              runCycleLeft();
+            }
+          }
+          
+          break; // 匹配成功，跳出 for 循环（避免重复匹配）
         }
-        case KEY_2:  {  
-          Serial.println("按键: 2"); 
-          lookUp();
-          break;
-        }
-        case KEY_3:     Serial.println("按键: 3"); break;
-        case KEY_4:     Serial.println("按键: 4"); break;
-        case KEY_5:     Serial.println("按键: 5"); break;
-        case KEY_6:     Serial.println("按键: 6"); break;
-        case KEY_7:     Serial.println("按键: 7"); break;
-        case KEY_8:     Serial.println("按键: 8"); break;
-        case KEY_9:     Serial.println("按键: 9"); break;
-
-        case KEY_STAR:  Serial.println("按键: *"); break;
-        case KEY_HASH:  Serial.println("按键: #"); break;
-
-        case KEY_UP:    {Serial.println("按键: ↑ (UP)"); slowBackWalk(); break;}
-        case KEY_DOWN:  {Serial.println("按键: ↓ (DOWN)"); 
-        // slowBackWalk(); 
-        break;}
-        case KEY_LEFT:  {Serial.println("按键: ← (LEFT)"); 
-        // turnWalkLeft(); 
-        break;}
-        case KEY_RIGHT: {Serial.println("按键: → (RIGHT)"); 
-        // turnWalkRight();
-        break;}
-        case KEY_OK:    Serial.println("按键: OK / SELECT"); break;
-
-        case KEY_POWER: Serial.println("按键: 🔌 POWER"); break;
-        case KEY_MODE:  Serial.println("按键: 🌀 MODE"); break;
-        case KEY_MUTE:  Serial.println("按键: 🔇 MUTE"); break;
-        case KEY_PLAY:  Serial.println("按键: ▶ PLAY"); break;
-
-        default:
-          Serial.print("未知按键 HEX: 0x");
-          Serial.println(currentCode, HEX);
-          break;
       }
-
-      lastCode = currentCode;
-      lastTime = millis();
     }
-
-    IrReceiver.resume(); // 准备接收下一帧
   }
-
-  // // 检查是否有来自蓝牙的数据
-  // if (Serial1.available() > 0) {
-  //   char receivedChar = Serial1.read(); // 读取一个字符
-  //   Serial.print("收到蓝牙指令: ");
-  //   Serial.println(receivedChar);
-
-  //   // 根据收到的指令控制舵机角度
-  //   switch (receivedChar) {
-  //     case '1':
-  //     {
-  //       Serial1.println("sit down");
-  //       sitDown();
-  //       break;
-  //     }
-  //     case '0':
-  //     {
-  //       standUp();
-  //       Serial1.println("stand up");
-  //       break;
-  //     }
-  //     case '2':
-  //     {
-  //       slowWalk();
-  //       Serial1.println("slow walk");
-  //       break;
-  //     }  
-  //     case '3':
-  //     {
-  //       slowBackWalk();
-  //       Serial1.println("slow back walk");
-  //       break;
-  //     }
-  //     case '4':
-  //     {
-  //       turnWalkLeft();
-  //       Serial1.println("turn walk left");
-  //       break;
-  //     }
-  //     case '5':
-  //     {
-  //       turnWalkRight();
-  //       Serial1.println("turn walk right");
-  //       break;
-  //     }
-  //     default:
-  //       Serial1.print("未知指令: ");
-  //       Serial1.println(receivedChar);
-  //       break;
-  //   }
-  // }
-
-  // 心跳防断连
-  if (millis() - lastPing > PING_INTERVAL) {
-    Serial1.print("."); // 发一个点，不干扰解析
-    lastPing = millis();
-  }
-
-  // // 将来自电脑的数据发送给蓝牙（可选，用于双向调试）
-  // if (Serial.available() > 0) {
-  //   char pcChar = Serial.read();
-  //   Serial1.write(pcChar); // 将电脑输入的数据转发给蓝牙
-  // }
 }
