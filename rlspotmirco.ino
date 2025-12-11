@@ -106,7 +106,6 @@ void setup() {
   pinMode(echoPin, INPUT);
 
   delay(10);
-
 }
 
 // 将角度（0~180）转换为 PCA9685 的 PWM 值
@@ -137,7 +136,7 @@ void sitDown() {
  setServoAngle(RB_UP, 90);
  setServoAngle(RB_DOWN, 90);
 
- delay(3000);
+ delay(1000);
 }
 
 void Stand() {
@@ -284,11 +283,25 @@ PROGMEM const uint8_t kneeAnglesBig[TOTAL_FRAMES] = {
 89, 88, 87, 86, 85, 85, 84, 84, 84, 84, 84, 84, 84, 84, 85, 85, 86, 87, 88, 89
 };
 
+void handShake() {
+  sitDown();
+
+  setServoAngle(RF_DOWN, 160);
+
+  setServoAngle(LF_DOWN, 30);
+  delay(1000);
+
+  for (int i = 160; i > 60; i--) {
+    setServoAngle(RF_DOWN, i);
+    delay(20);
+  }
+}
+
 
 void slowBackWalk() {
  for (int i = 0; i < TOTAL_FRAMES; i++) {
-    uint8_t h = pgm_read_byte(&hipAnglesBak[i]);
-    uint8_t k = pgm_read_byte(&kneeAnglesBak[i]);
+    uint8_t h = pgm_read_byte(&hipAnglesSmall[i]);
+    uint8_t k = pgm_read_byte(&kneeAnglesSmall[i]);
 
     setServoAngle(LF_UP, h);
     setServoAngle(LF_DOWN, 180 - k);
@@ -302,8 +315,8 @@ void slowBackWalk() {
   delay(1000);
 
   for (int i = 0; i < TOTAL_FRAMES; i++) {
-    uint8_t h = pgm_read_byte(&hipAnglesBak[i]);
-    uint8_t k = pgm_read_byte(&kneeAnglesBak[i]);
+    uint8_t h = pgm_read_byte(&hipAnglesSmall[i]);
+    uint8_t k = pgm_read_byte(&kneeAnglesSmall[i]);
 
     setServoAngle(LB_UP, h);
     setServoAngle(LB_DOWN, 180 - k);
