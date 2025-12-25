@@ -4,37 +4,40 @@ import io
 import logging
 import socketserver
 from http import server
-from threading import Condition
+from threading import Condition, Thread, Event
 import subprocess
 import os
 import time
 import serial
+import queue
 import numpy as np
 from PIL import Image
+from picamera2 import Picamera2
+
+# --- 日志配置 ---
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # ----------------------------
-# YOLO 和串口初始化（全局）
+# 全局：YOLO 和串口初始化
 # ----------------------------
+model = None
 try:
     from ultralytics import YOLO
-    model = YOLO("/home/pi/ultralytics/ultralytics/yolo11n.pt")  # 请确认路径正确
+    model = YOLO("yolov8n.pt")
     print("✅ YOLO model loaded.")
 except Exception as e:
     logging.error(f"❌ Failed to load YOLO model: {e}")
-    model = None
 
-# 串口配置（语音模块）
+ser = None
 try:
     ser = serial.Serial("/dev/ttyAMA0", 115200, timeout=1)
     print("✅ Speech Serial Opened! Baudrate=115200")
 except Exception as e:
     print(f"⚠️ Speech Serial Open Failed: {e}")
-    ser = None
 
-CMD_ORANGE_DETECTED = 0x0C  # 你定义的橙子检测指令
+CMD_ORANGE_DETECTED = 0x0C
 
 def send_voice_cmd(cmd_byte):
-    """发送语音播报指令"""
     if ser is None or not ser.is_open:
         return
     cmd = bytearray([0xAA, 0x55, 0x00, cmd_byte & 0xFF, 0xFB])
@@ -42,35 +45,8 @@ def send_voice_cmd(cmd_byte):
     ser.flush()
     time.sleep(0.01)
 
-def detect_orange_from_frame(frame_bytes):
-    """从 JPEG 字节流中检测是否包含 'orange' 类别"""
-    if model is None:
-        logging.warning("YOLO model not available for detection")
-        return False
 
-    try:
-        # 解码 JPEG 字节为 RGB numpy 数组
-        image = Image.open(io.BytesIO(frame_bytes)).convert('RGB')
-        img_array = np.array(image)  # H x W x 3, uint8, RGB
-
-        # 推理（verbose=False 关闭日志）
-        results = model(img_array, verbose=False)
-
-        # 遍历所有检测结果
-        for result in results:
-            if result.boxes is not None and len(result.boxes) > 0:
-                class_names = result.names  # {0: 'person', ..., N: 'orange'}
-                cls_indices = result.boxes.cls.cpu().numpy().astype(int)
-                for idx in cls_indices:
-                    if class_names.get(idx) == "orange":
-                        return True
-        return False
-    except Exception as e:
-        logging.error(f"YOLO inference error: {e}")
-        return False
-
-
-# === 脚本映射（f2 设为 None 表示由内部逻辑处理）===
+# === 脚本映射 ===
 SCRIPTS = {
     'up': '/home/pi/scripts/up.py',
     'down': '/home/pi/scripts/down.py',
@@ -78,7 +54,7 @@ SCRIPTS = {
     'right': '/home/pi/scripts/right.py',
     'center': '/home/pi/scripts/center.py',
     'f1': '/home/pi/scripts/f1.py',
-    'f2': None,  # 特殊：触发 YOLO 检测
+    'f2': None,
     'f3': '/home/pi/scripts/f3.py',
     'f4': '/home/pi/scripts/f4.py',
     'f5': '/home/pi/scripts/f5.py',
@@ -89,14 +65,12 @@ SCRIPTS = {
     'f10': '/home/pi/scripts/f10.py',
 }
 
-# 安全检查（跳过 f2）
 for name, path in SCRIPTS.items():
     if path and not os.path.isfile(path):
         logging.warning(f"Script for '{name}' not found: {path}")
 
 
 def get_cpu_temperature():
-    """返回 CPU 温度（°C），失败返回 None"""
     try:
         result = subprocess.run(['vcgencmd', 'measure_temp'], capture_output=True, text=True, timeout=2)
         temp_str = result.stdout.strip()
@@ -110,11 +84,105 @@ def get_cpu_temperature():
             return None
 
 
+# ========================
+# 输出缓冲区（线程安全）
+# ========================
+class StreamingOutput:
+    def __init__(self):
+        self.annotated_frame = None
+        self.raw_frame = None
+        self.condition = Condition()
+
+    def update_frames(self, raw_frame, annotated_frame):
+        with self.condition:
+            self.raw_frame = raw_frame
+            self.annotated_frame = annotated_frame
+            self.condition.notify_all()
+
+
+# ========================
+# YOLO 推理线程
+# ========================
+def yolo_inference_thread(raw_queue, output_obj, model, stop_event):
+    while not stop_event.is_set():
+        raw_frame = None
+        try:
+            while not raw_queue.empty():
+                raw_frame = raw_queue.get_nowait()
+        except queue.Empty:
+            pass
+
+        if raw_frame is None:
+            time.sleep(0.01)
+            continue
+
+        try:
+            # raw_frame 是 bytes (JPEG)
+            image = Image.open(io.BytesIO(raw_frame)).convert('RGB')
+            img_array = np.array(image)
+            results = model(img_array, verbose=False, imgsz=640)
+            annotated_bgr = results[0].plot()
+            annotated_rgb = annotated_bgr[:, :, ::-1]
+            pil_img = Image.fromarray(annotated_rgb)
+            with io.BytesIO() as buf:
+                pil_img.save(buf, format="JPEG", quality=70)
+                annotated_jpeg = buf.getvalue()
+        except Exception as e:
+            logging.error(f"YOLO inference error: {e}")
+            annotated_jpeg = raw_frame
+
+        output_obj.update_frames(raw_frame, annotated_jpeg)
+
+
+# ========================
+# 摄像头采集线程（替代 FileOutput）
+# ========================
+def camera_capture_thread(picam2, raw_queue, stop_event):
+    """持续捕获摄像头帧并编码为 JPEG，送入队列"""
+    while not stop_event.is_set():
+        try:
+            frame_array = picam2.capture_array("main")
+
+            # 确保数据类型正确
+            if frame_array.dtype != np.uint8:
+                frame_array = frame_array.astype(np.uint8)
+
+            # 处理通道数：RGBA → RGB
+            if frame_array.ndim == 3 and frame_array.shape[2] == 4:
+                # RGBA
+                pil_img = Image.fromarray(frame_array, mode='RGBA').convert('RGB')
+            elif frame_array.ndim == 3 and frame_array.shape[2] == 3:
+                # RGB
+                pil_img = Image.fromarray(frame_array, mode='RGB')
+            else:
+                # 灰度图等（理论上不会出现）
+                pil_img = Image.fromarray(frame_array).convert('RGB')
+
+            with io.BytesIO() as buf:
+                pil_img.save(buf, format="JPEG", quality=70)
+                jpeg_bytes = buf.getvalue()
+
+            # 入队（只保留最新帧）
+            try:
+                while not raw_queue.empty():
+                    raw_queue.get_nowait()
+                raw_queue.put_nowait(jpeg_bytes)
+            except queue.Full:
+                pass
+
+        except Exception as e:
+            logging.error(f"Camera capture error: {e}")
+            time.sleep(0.1)
+
+
+# ========================
+# Web 页面（保持不变）
+# ========================
 PAGE = """\
 <html>
 <head>
 <meta charset="UTF-8">
-<title>Camera Control</title>
+<title>YOLO Camera Control</title>
 <style>
   body {
     margin: 0;
@@ -254,10 +322,9 @@ document.addEventListener('DOMContentLoaded', () => {
   <div class="video-container">
     <img src="stream.mjpg" width="640" height="480" style="border: 1px solid #ddd; border-radius: 8px;" />
     <div class="temp-display">CPU 温度: <span id="cpu-temp">--</span></div>
-    <h1>摄像头实时画面</h1>
+    <h1>YOLO 实时检测画面</h1>
   </div>
 
-  <!-- 方向控制 -->
   <div class="panel">
     <h2>方向控制</h2>
     <button class="btn direction-btn" onclick="sendCmd('up')">↑</button>
@@ -269,7 +336,6 @@ document.addEventListener('DOMContentLoaded', () => {
     <button class="btn direction-btn" onclick="sendCmd('down')">↓</button>
   </div>
 
-  <!-- 功能按钮 f1~f10 -->
   <div class="panel">
     <h2>功能按钮</h2>
     <div class="function-row">
@@ -290,17 +356,9 @@ document.addEventListener('DOMContentLoaded', () => {
 """
 
 
-class StreamingOutput(io.BufferedIOBase):
-    def __init__(self):
-        self.frame = None
-        self.condition = Condition()
-
-    def write(self, buf):
-        with self.condition:
-            self.frame = buf
-            self.condition.notify_all()
-
-
+# ========================
+# HTTP Handler
+# ========================
 class StreamingHandler(server.BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == '/':
@@ -325,20 +383,20 @@ class StreamingHandler(server.BaseHTTPRequestHandler):
                 while True:
                     with output.condition:
                         output.condition.wait()
-                        frame = output.frame
-                    self.wfile.write(b'--FRAME\r\n')
-                    self.send_header('Content-Type', 'image/jpeg')
-                    self.send_header('Content-Length', len(frame))
-                    self.end_headers()
-                    self.wfile.write(frame)
-                    self.wfile.write(b'\r\n')
+                        frame = output.annotated_frame
+                    if frame:
+                        self.wfile.write(b'--FRAME\r\n')
+                        self.send_header('Content-Type', 'image/jpeg')
+                        self.send_header('Content-Length', len(frame))
+                        self.end_headers()
+                        self.wfile.write(frame)
+                        self.wfile.write(b'\r\n')
             except Exception as e:
                 logging.warning('Removed streaming client %s: %s', self.client_address, str(e))
         elif self.path == '/temperature':
             temp = get_cpu_temperature()
             if temp is not None:
-                response_text = f"{temp:.1f}"
-                response = response_text.encode('utf-8')
+                response = f"{temp:.1f}".encode('utf-8')
                 self.send_response(200)
                 self.send_header('Content-Type', 'text/plain; charset=utf-8')
                 self.send_header('Content-Length', len(response))
@@ -350,30 +408,41 @@ class StreamingHandler(server.BaseHTTPRequestHandler):
             self.send_error(404)
 
     def do_POST(self):
-        global output
+        logging.info(f"Received POST to: {self.path}")
         if self.path.startswith('/cmd/'):
             cmd = self.path.split('/')[-1]
             if cmd == 'f2':
-                # 处理 F2：YOLO 橙子检测
-                try:
-                    with output.condition:
-                        frame = output.frame
-                    if frame is None:
-                        self.send_error(500, "No video frame available")
-                        return
+                with output.condition:
+                    frame_bytes = output.raw_frame
+                if frame_bytes is None:
+                    self.send_error(500, "No frame available")
+                    return
 
-                    orange_found = detect_orange_from_frame(frame)
-                    if orange_found:
-                        send_voice_cmd(CMD_ORANGE_DETECTED)
-                        logging.info("🍊 Orange detected! Voice command sent.")
-                    else:
-                        logging.info("No orange detected.")
+                orange_found = False
+                if model is not None:
+                    try:
+                        image = Image.open(io.BytesIO(frame_bytes)).convert('RGB')
+                        img_array = np.array(image)
+                        results = model(img_array, verbose=False)
+                        for result in results:
+                            if result.boxes is not None:
+                                cls_indices = result.boxes.cls.cpu().numpy().astype(int)
+                                for idx in cls_indices:
+                                    if result.names.get(idx) == "orange":
+                                        orange_found = True
+                                        break
+                    except Exception as e:
+                        logging.error(f"f2 detection error: {e}")
 
-                    self.send_response(200)
-                    self.end_headers()
-                except Exception as e:
-                    logging.error(f"F2 detection failed: {e}")
-                    self.send_error(500)
+                if orange_found:
+                    send_voice_cmd(CMD_ORANGE_DETECTED)
+                    logging.info("🍊 Orange detected! Voice command sent.")
+                else:
+                    logging.info("No orange detected.")
+
+                self.send_response(200)
+                self.end_headers()
+
             elif cmd in SCRIPTS:
                 script_path = SCRIPTS[cmd]
                 if script_path is None:
@@ -384,15 +453,12 @@ class StreamingHandler(server.BaseHTTPRequestHandler):
                     if result.returncode == 0:
                         self.send_response(200)
                         self.end_headers()
-                        logging.info(f"Executed script: {cmd} -> {script_path}")
+                        logging.info(f"Executed: {cmd}")
                     else:
-                        logging.error(f"Script failed: {cmd}, stderr: {result.stderr}")
+                        logging.error(f"Script failed: {result.stderr}")
                         self.send_error(500)
-                except subprocess.TimeoutExpired:
-                    logging.error(f"Script timeout: {cmd}")
-                    self.send_error(500)
                 except Exception as e:
-                    logging.error(f"Failed to run script {cmd}: {e}")
+                    logging.error(f"Run script error: {e}")
                     self.send_error(500)
             else:
                 self.send_error(400, "Invalid command")
@@ -405,19 +471,58 @@ class StreamingServer(socketserver.ThreadingMixIn, server.HTTPServer):
     daemon_threads = True
 
 
-# 启动摄像头
-picam2 = Picamera2()
-picam2.configure(picam2.create_video_configuration(main={"size": (640, 480)}))
-output = StreamingOutput()
-picam2.start_recording(JpegEncoder(), FileOutput(output))
+# ========================
+# 主程序启动
+# ========================
+if __name__ == '__main__':
+    output = StreamingOutput()
+    raw_frame_queue = queue.Queue(maxsize=1)
 
-try:
-    address = ('', 8000)
-    server = StreamingServer(address, StreamingHandler)
-    print("🚀 Starting server on port 8000...")
-    print("🌐 Open http://<your-pi-ip>:8000 in your browser")
-    server.serve_forever()
-finally:
-    picam2.stop_recording()
-    if ser and ser.is_open:
-        ser.close()
+    # 启动 YOLO 推理线程
+    stop_inference = Event()
+    inference_thread = None
+    if model is not None:
+        inference_thread = Thread(
+            target=yolo_inference_thread,
+            args=(raw_frame_queue, output, model, stop_inference),
+            daemon=True
+        )
+        inference_thread.start()
+        print("🧵 YOLO inference thread started.")
+
+    # 启动摄像头（不使用 FileOutput）
+    picam2 = Picamera2()
+    video_config = picam2.create_video_configuration(
+        main={"size": (640, 480)},
+        controls={"FrameRate": 10.0}
+    )
+    picam2.configure(video_config)
+    picam2.start()
+
+    # 启动采集线程
+    stop_capture = Event()
+    capture_thread = Thread(
+        target=camera_capture_thread,
+        args=(picam2, raw_frame_queue, stop_capture),
+        daemon=True
+    )
+    capture_thread.start()
+    print("📸 Camera capture thread started.")
+
+    try:
+        address = ('', 8000)
+        server = StreamingServer(address, StreamingHandler)
+        print("🚀 Starting stable YOLO streaming server on port 8000...")
+        print("🌐 Open http://<your-pi-ip>:8000")
+        server.serve_forever()
+    finally:
+        stop_capture.set()
+        stop_inference.set()
+        if inference_thread:
+            inference_thread.join(timeout=2)
+        if capture_thread:
+            capture_thread.join(timeout=2)
+        picam2.stop()
+        if ser and ser.is_open:
+            ser.close()
+        print("🛑 Server stopped cleanly.")
