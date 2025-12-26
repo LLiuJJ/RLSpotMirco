@@ -449,7 +449,7 @@ class StreamingHandler(server.BaseHTTPRequestHandler):
                     self.send_error(400, "Command not implemented")
                     return
                 try:
-                    result = subprocess.run(['python3', script_path], capture_output=True, text=True, timeout=10)
+                    result = subprocess.run(['python3', script_path], capture_output=True, text=True, timeout=60)
                     if result.returncode == 0:
                         self.send_response(200)
                         self.end_headers()

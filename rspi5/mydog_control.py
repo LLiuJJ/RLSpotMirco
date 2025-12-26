@@ -11,6 +11,12 @@ import time
 import serial
 import numpy as np
 from PIL import Image
+from picamera2 import Picamera2
+from picamera2.encoders import JpegEncoder
+from picamera2.outputs import FileOutput
+
+# --- 全局变量 ---
+output = None  # 占位，稍后初始化
 
 # ----------------------------
 # YOLO 和串口初始化（全局）
@@ -350,7 +356,8 @@ class StreamingHandler(server.BaseHTTPRequestHandler):
             self.send_error(404)
 
     def do_POST(self):
-        global output
+        #global output
+        logging.info(f"Received POST to: {self.path}")
         if self.path.startswith('/cmd/'):
             cmd = self.path.split('/')[-1]
             if cmd == 'f2':
@@ -380,7 +387,7 @@ class StreamingHandler(server.BaseHTTPRequestHandler):
                     self.send_error(400, "Command not implemented")
                     return
                 try:
-                    result = subprocess.run(['python3', script_path], capture_output=True, text=True, timeout=10)
+                    result = subprocess.run(['python3', script_path], capture_output=True, text=True, timeout=60)
                     if result.returncode == 0:
                         self.send_response(200)
                         self.end_headers()
