@@ -2,11 +2,12 @@ package shardctrler
 
 import (
 	"fmt"
+	"log"
 	"time"
 )
 
 //
-// Shard controler: assigns shards to replication groups.
+// Shard controller: assigns shards to replication groups.
 //
 // RPC interface:
 // Join(servers) -- add a set of groups (gid -> server-list mapping).
@@ -33,25 +34,24 @@ type Config struct {
 	Groups map[int][]string // gid -> servers[]
 }
 
-type Err uint8
-
-const (
-	OK Err = iota
-	ErrWrongLeader
-	ErrTimeout
-)
-
 func DefaultConfig() Config {
 	return Config{Groups: make(map[int][]string)}
 }
 
-func (cfg Config) String() string {
-	return fmt.Sprintf("Config(%v, %v, %v)", cfg.Num, cfg.Shards, cfg.Groups)
+func (cf Config) String() string {
+	return fmt.Sprintf("{Num:%v,Shards:%v,Groups:%v}", cf.Num, cf.Shards, cf.Groups)
 }
 
-const ExecuteTimeout = 500 * time.Microsecond
+const ExecuteTimeout = 500 * time.Millisecond
 
 const Debug = false
+
+func DPrintf(format string, a ...interface{}) (n int, err error) {
+	if Debug {
+		log.Printf(format, a...)
+	}
+	return
+}
 
 type Command struct {
 	*CommandRequest
@@ -62,6 +62,37 @@ type OperationContext struct {
 	LastResponse        *CommandResponse
 }
 
+type OperationOp uint8
+
+const (
+	OpJoin OperationOp = iota
+	OpLeave
+	OpMove
+	OpQuery
+)
+
+func (op OperationOp) String() string {
+	switch op {
+	case OpJoin:
+		return "OpJoin"
+	case OpLeave:
+		return "OpLeave"
+	case OpMove:
+		return "OpMove"
+	case OpQuery:
+		return "OpQuery"
+	}
+	panic(fmt.Sprintf("unexpected CommandOp %d", op))
+}
+
+type Err uint8
+
+const (
+	OK Err = iota
+	ErrWrongLeader
+	ErrTimeout
+)
+
 func (err Err) String() string {
 	switch err {
 	case OK:
@@ -70,78 +101,16 @@ func (err Err) String() string {
 		return "ErrWrongLeader"
 	case ErrTimeout:
 		return "ErrTimeout"
-	default:
-		return "ErrUnknown"
 	}
-}
-
-// type JoinArgs struct {
-// 	Servers map[int][]string // new GID -> servers mappings
-// }
-
-// type JoinReply struct {
-// 	WrongLeader bool
-// 	Err         Err
-// }
-
-// type LeaveArgs struct {
-// 	GIDs []int
-// }
-
-// type LeaveReply struct {
-// 	WrongLeader bool
-// 	Err         Err
-// }
-
-// type MoveArgs struct {
-// 	Shard int
-// 	GID   int
-// }
-
-// type MoveReply struct {
-// 	WrongLeader bool
-// 	Err         Err
-// }
-
-// type QueryArgs struct {
-// 	Num int // desired config number
-// }
-
-// type QueryReply struct {
-// 	WrongLeader bool
-// 	Err         Err
-// 	Config      Config
-// }
-
-type OperationOp uint8
-
-const (
-	JoinOp OperationOp = iota
-	LeaveOp
-	MoveOp
-	QueryOp
-)
-
-func (op OperationOp) String() string {
-	switch op {
-	case JoinOp:
-		return "Join"
-	case LeaveOp:
-		return "Leave"
-	case MoveOp:
-		return "Move"
-	case QueryOp:
-		return "Query"
-	}
-	panic(fmt.Sprintf("unexpected command %d", op))
+	panic(fmt.Sprintf("unexpected Err %d", err))
 }
 
 type CommandRequest struct {
-	Servers   map[int][]string
-	GIDs      []int
-	Shard     int
-	GID       int
-	Num       int
+	Servers   map[int][]string // for Join
+	GIDs      []int            // for Leave
+	Shard     int              // for Move
+	GID       int              // for Move
+	Num       int              // for Query
 	Op        OperationOp
 	ClientId  int64
 	CommandId int64
@@ -149,16 +118,16 @@ type CommandRequest struct {
 
 func (request CommandRequest) String() string {
 	switch request.Op {
-	case JoinOp:
-		return fmt.Sprintf("Join(%v)", request.Servers)
-	case LeaveOp:
-		return fmt.Sprintf("Leave(%v)", request.GIDs)
-	case MoveOp:
-		return fmt.Sprintf("Move(%v, %v)", request.Shard, request.GID)
-	case QueryOp:
-		return fmt.Sprintf("Query(%v)", request.Num)
+	case OpJoin:
+		return fmt.Sprintf("{Servers:%v,Op:%v,ClientId:%v,CommandId:%v}", request.Servers, request.Op, request.ClientId, request.CommandId)
+	case OpLeave:
+		return fmt.Sprintf("{GIDs:%v,Op:%v,ClientId:%v,CommandId:%v}", request.GIDs, request.Op, request.ClientId, request.CommandId)
+	case OpMove:
+		return fmt.Sprintf("{Shard:%v,Num:%v,Op:%v,ClientId:%v,CommandId:%v}", request.Shard, request.Num, request.Op, request.ClientId, request.CommandId)
+	case OpQuery:
+		return fmt.Sprintf("{Num:%v,Op:%v,ClientId:%v,CommandId:%v}", request.Num, request.Op, request.ClientId, request.CommandId)
 	}
-	panic("Unknown operation")
+	panic(fmt.Sprintf("unexpected CommandOp %d", request.Op))
 }
 
 type CommandResponse struct {
@@ -167,5 +136,5 @@ type CommandResponse struct {
 }
 
 func (response CommandResponse) String() string {
-	return fmt.Sprintf("Response(%v)", response.Err)
+	return fmt.Sprintf("{Err:%v,Config:%v}", response.Err, response.Config)
 }

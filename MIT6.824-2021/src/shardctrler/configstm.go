@@ -1,6 +1,8 @@
 package shardctrler
 
-import "sort"
+import (
+	"sort"
+)
 
 type ConfigStateMachine interface {
 	Join(groups map[int][]string) Err
@@ -13,7 +15,7 @@ type MemoryConfigStateMachine struct {
 	Configs []Config
 }
 
-func NewMemoryConfigStateMachines() *MemoryConfigStateMachine {
+func NewMemoryConfigStateMachine() *MemoryConfigStateMachine {
 	cf := &MemoryConfigStateMachine{make([]Config, 1)}
 	cf.Configs[0] = DefaultConfig()
 	return cf
@@ -29,7 +31,7 @@ func (cf *MemoryConfigStateMachine) Join(groups map[int][]string) Err {
 			newConfig.Groups[gid] = newServers
 		}
 	}
-	s2g := Groups2Shards(newConfig)
+	s2g := Group2Shards(newConfig)
 	for {
 		source, target := GetGIDWithMaximumShards(s2g), GetGIDWithMinimumShards(s2g)
 		if source != 0 && len(s2g[source])-len(s2g[target]) <= 1 {
@@ -52,18 +54,19 @@ func (cf *MemoryConfigStateMachine) Join(groups map[int][]string) Err {
 func (cf *MemoryConfigStateMachine) Leave(gids []int) Err {
 	lastConfig := cf.Configs[len(cf.Configs)-1]
 	newConfig := Config{len(cf.Configs), lastConfig.Shards, deepCopy(lastConfig.Groups)}
-	s2g := Groups2Shards(newConfig)
+	s2g := Group2Shards(newConfig)
 	orphanShards := make([]int, 0)
 	for _, gid := range gids {
 		if _, ok := newConfig.Groups[gid]; ok {
 			delete(newConfig.Groups, gid)
 		}
-		if shard, ok := s2g[gid]; ok {
-			orphanShards = append(orphanShards, shard...)
+		if shards, ok := s2g[gid]; ok {
+			orphanShards = append(orphanShards, shards...)
 			delete(s2g, gid)
 		}
 	}
 	var newShards [NShards]int
+	// load balancing is performed only when raft groups exist
 	if len(newConfig.Groups) != 0 {
 		for _, shard := range orphanShards {
 			target := GetGIDWithMinimumShards(s2g)
@@ -95,7 +98,7 @@ func (cf *MemoryConfigStateMachine) Query(num int) (Config, Err) {
 	return cf.Configs[num], OK
 }
 
-func Groups2Shards(config Config) map[int][]int {
+func Group2Shards(config Config) map[int][]int {
 	s2g := make(map[int][]int)
 	for gid := range config.Groups {
 		s2g[gid] = make([]int, 0)
@@ -107,31 +110,34 @@ func Groups2Shards(config Config) map[int][]int {
 }
 
 func GetGIDWithMinimumShards(s2g map[int][]int) int {
+	// make iteration deterministic
 	var keys []int
 	for k := range s2g {
 		keys = append(keys, k)
 	}
 	sort.Ints(keys)
-
+	// find GID with minimum shards
 	index, min := -1, NShards+1
 	for _, gid := range keys {
 		if gid != 0 && len(s2g[gid]) < min {
 			index, min = gid, len(s2g[gid])
 		}
 	}
-
 	return index
 }
 
 func GetGIDWithMaximumShards(s2g map[int][]int) int {
+	// always choose gid 0 if there is any
 	if shards, ok := s2g[0]; ok && len(shards) > 0 {
 		return 0
 	}
+	// make iteration deterministic
 	var keys []int
 	for k := range s2g {
 		keys = append(keys, k)
 	}
 	sort.Ints(keys)
+	// find GID with maximum shards
 	index, max := -1, -1
 	for _, gid := range keys {
 		if len(s2g[gid]) > max {

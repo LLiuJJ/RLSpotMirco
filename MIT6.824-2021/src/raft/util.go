@@ -1,6 +1,7 @@
 package raft
 
 import (
+	"fmt"
 	"log"
 	"math/rand"
 	"sync"
@@ -15,6 +16,28 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 		log.Printf(format, a...)
 	}
 	return
+}
+
+type ApplyMsg struct {
+	CommandValid bool
+	Command      interface{}
+	CommandIndex int
+	CommandTerm  int
+
+	SnapshotValid bool
+	Snapshot      []byte
+	SnapshotTerm  int
+	SnapshotIndex int
+}
+
+func (msg ApplyMsg) String() string {
+	if msg.CommandValid {
+		return fmt.Sprintf("Command%v", msg.Command)
+	} else if msg.SnapshotValid {
+		return fmt.Sprintf("Snapshot%v", msg.Command)
+	} else {
+		panic("unexpected ApplyMsg")
+	}
 }
 
 type NodeState uint8

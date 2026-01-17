@@ -4,13 +4,13 @@ import "fmt"
 
 type RequestVoteRequest struct {
 	Term         int
-	CandidatedId int
+	CandidateId  int
 	LastLogIndex int
 	LastLogTerm  int
 }
 
 func (request RequestVoteRequest) String() string {
-	return fmt.Sprintf("RequestVoteRequest{Term:%d, CandidatedId:%d, LastLogIndex:%d, LastLogTerm:%d}", request.Term, request.CandidatedId, request.LastLogIndex, request.LastLogTerm)
+	return fmt.Sprintf("RequestVoteRequest{Term:%d, CandidatedId:%d, LastLogIndex:%d, LastLogTerm:%d}", request.Term, request.CandidateId, request.LastLogIndex, request.LastLogTerm)
 }
 
 type RequestVoteResponse struct {
