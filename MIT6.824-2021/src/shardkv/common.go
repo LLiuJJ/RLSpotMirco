@@ -24,6 +24,15 @@ const (
 	EmptyEntryDetectorTimeout = 200 * time.Millisecond
 )
 
+const Debug = false
+
+func DPrintf(format string, a ...interface{}) (n int, err error) {
+	if Debug {
+		fmt.Printf(format, a...)
+	}
+	return
+}
+
 type Err uint8
 
 const (
@@ -41,7 +50,7 @@ func (err Err) String() string {
 	case OK:
 		return "OK"
 	case ErrNoKey:
-		return "ErrNdKey"
+		return "ErrNoKey"
 	case ErrWrongGroup:
 		return "ErrWrongGroup"
 	case ErrWrongLeader:
@@ -172,7 +181,7 @@ type CommandRequest struct {
 }
 
 func (request CommandRequest) String() string {
-	return fmt.Sprintf("Shard:%d", key2shard(request.Key))
+	return fmt.Sprintf("{Key:%v, Value:%v, Op:%v, ClientId:%d, CommandId:%d}", request.Key, request.Value, request.Op, request.ClientId, request.CommandId)
 }
 
 type CommandResponse struct {
@@ -180,9 +189,17 @@ type CommandResponse struct {
 	Value string
 }
 
+func (response CommandResponse) String() string {
+	return fmt.Sprintf("{Err:%v, Value:%v}", response.Err, response.Value)
+}
+
 type ShardOperationRequest struct {
 	ConfigNum int
 	ShardIDs  []int
+}
+
+func (request ShardOperationRequest) String() string {
+	return fmt.Sprintf("{ConfigNum:%d, ShardIDs:%v}", request.ConfigNum, request.ShardIDs)
 }
 
 type ShardOperationResponse struct {
@@ -190,4 +207,8 @@ type ShardOperationResponse struct {
 	ConfigNum      int
 	Shards         map[int]map[string]string
 	LastOperations map[int64]OperationContext
+}
+
+func (response ShardOperationResponse) String() string {
+	return fmt.Sprintf("{Err:%v, ConfigNum:%d, Shards:%v, LastOperations:%v}", response.Err, response.ConfigNum, response.Shards, response.LastOperations)
 }

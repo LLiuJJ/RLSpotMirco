@@ -55,7 +55,9 @@ func (cf *MemoryConfigStateMachine) Leave(gids []int) Err {
 	s2g := Groups2Shards(newConfig)
 	orphanShards := make([]int, 0)
 	for _, gid := range gids {
-		delete(newConfig.Groups, gid)
+		if _, ok := newConfig.Groups[gid]; ok {
+			delete(newConfig.Groups, gid)
+		}
 		if shard, ok := s2g[gid]; ok {
 			orphanShards = append(orphanShards, shard...)
 			delete(s2g, gid)

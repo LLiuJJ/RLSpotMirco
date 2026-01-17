@@ -12,7 +12,6 @@ import (
 
 type ShardCtrler struct {
 	mu      sync.RWMutex
-	me      int
 	dead    int32
 	rf      *raft.Raft
 	applyCh chan raft.ApplyMsg
